@@ -9,46 +9,81 @@ import os
 from datetime import datetime
 import torch.nn as nn
 from transformers import BertModel
-from torchvision.models import resnet50
+from torchvision.models import resnet50, ResNet50_Weights
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from sklearn.metrics import f1_score
+from torch.amp import autocast, GradScaler
 
 class HatefulMemesModel(nn.Module):
     def __init__(self, bert_model='bert-base-uncased'):
         super().__init__()
         
-        # Image encoder (ResNet-50)
-        self.image_encoder = resnet50(pretrained=True)
-        self.image_encoder.fc = nn.Linear(self.image_encoder.fc.in_features, 512)
+        # 1. More aggressive freezing of backbone
+        self.image_encoder = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)  # Fix deprecation warning
+        for param in self.image_encoder.parameters():
+            param.requires_grad = False
+        # Only unfreeze final layers
+        for param in self.image_encoder.layer4.parameters():
+            param.requires_grad = True
+        self.image_encoder.fc = nn.Linear(self.image_encoder.fc.in_features, 768)
         
-        # Text encoder (BERT)
+        # 2. Freeze more BERT layers
         self.text_encoder = BertModel.from_pretrained(bert_model)
-        self.text_projection = nn.Linear(768, 512)  # BERT hidden size to common space
-        
-        # Fusion and classification
+        for param in self.text_encoder.parameters():
+            param.requires_grad = False
+        # Only unfreeze final layers
+        for param in self.text_encoder.encoder.layer[-2:].parameters():
+            param.requires_grad = True
+            
+        # 3. Simpler fusion network
         self.fusion = nn.Sequential(
-            nn.Linear(1024, 512),  # 512 (image) + 512 (text) = 1024
-            nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Linear(768 * 2, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Dropout(0.5),  # Increased dropout
+            
             nn.Linear(512, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 1)  # Binary classification
+            nn.LayerNorm(128),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            
+            nn.Linear(128, 1)
         )
         
+        # 4. Initialize weights properly
+        self._init_weights()
+        
+    def _init_weights(self):
+        """Initialize the weights"""
+        for module in self.fusion.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+                    
     def forward(self, images, input_ids, attention_mask):
-        # Image encoding
+        # 5. Better feature extraction
         image_features = self.image_encoder(images)
         
-        # Text encoding
-        text_outputs = self.text_encoder(input_ids, attention_mask=attention_mask)
-        text_features = self.text_projection(text_outputs.last_hidden_state[:, 0, :])  # Use [CLS] token
+        text_outputs = self.text_encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True
+        )
         
-        # Concatenate features
-        combined_features = torch.cat([image_features, text_features], dim=1)
+        # Use both [CLS] and average of last hidden state
+        cls_token = text_outputs.last_hidden_state[:, 0, :]
+        avg_token = text_outputs.last_hidden_state.mean(dim=1)
+        text_features = (cls_token + avg_token) / 2
         
-        # Classification
-        output = self.fusion(combined_features)
-        return output.squeeze()
+        # Normalize features
+        image_features = F.normalize(image_features, p=2, dim=1)
+        text_features = F.normalize(text_features, p=2, dim=1)
+        
+        # Combine and classify
+        combined = torch.cat([image_features, text_features], dim=1)
+        return self.fusion(combined).squeeze()
 
 class KaggleHatefulMemesEvaluator:
     def __init__(self, model, device, log_dir='/kaggle/working/runs/hateful_memes'):
@@ -228,9 +263,10 @@ val_dataset = HatefulMemesDataset(
 # Create dataloaders
 train_loader = DataLoader(
     train_dataset,
-    batch_size=32,
-    sampler=train_dataset.get_sampler(),
-    num_workers=2
+    batch_size=16,  # Smaller batch size
+    shuffle=True,
+    num_workers=2,
+    pin_memory=True
 )
 
 val_loader = DataLoader(
@@ -245,8 +281,20 @@ model = HatefulMemesModel()
 model = model.to(device)
 
 # Initialize optimizer and loss function
-optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
-criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.AdamW([
+    {'params': model.image_encoder.parameters(), 'lr': 5e-6},
+    {'params': model.text_encoder.parameters(), 'lr': 1e-5},
+    {'params': model.fusion.parameters(), 'lr': 5e-5}
+], weight_decay=0.1)
+
+# Learning rate scheduler
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='max', factor=0.5, patience=1, verbose=True
+)
+
+# Loss function with class weights
+pos_weight = torch.tensor([3.0]).to(device)
+criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 # Initialize evaluator
 evaluator = KaggleHatefulMemesEvaluator(model, device)
@@ -258,7 +306,7 @@ best_val_auroc = 0
 for epoch in range(num_epochs):
     # Training phase
     model.train()
-    train_loss = 0
+    total_loss = 0
     for batch_idx, batch in enumerate(train_loader):
         # Move data to device
         images = batch['image'].to(device)
@@ -266,23 +314,27 @@ for epoch in range(num_epochs):
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['label'].to(device)
         
-        # Forward pass
+        # Mixed precision training
+        with autocast('cuda'):
+            outputs = model(images, input_ids, attention_mask)
+            loss = criterion(outputs, labels)
+        
         optimizer.zero_grad()
-        outputs = model(images, input_ids, attention_mask)
-        loss = criterion(outputs, labels)
+        scaler = GradScaler()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        scaler.step(optimizer)
+        scaler.update()
         
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-        
-        train_loss += loss.item()
+        total_loss += loss.item()
         
         # Print progress
         if (batch_idx + 1) % 20 == 0:
             print(f'Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_loader)}], '
-                  f'Loss: {loss.item():.4f}')
+                  f'Loss: {loss.item():.4f}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
     
-    avg_train_loss = train_loss / len(train_loader)
+    avg_train_loss = total_loss / len(train_loader)
     print(f'\nEpoch [{epoch+1}/{num_epochs}], Average Training Loss: {avg_train_loss:.4f}')
     
     # Validation phase
