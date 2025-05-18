@@ -52,13 +52,37 @@ class HatefulMemesDataset(Dataset):
             for line in f:
                 self.data.append(json.loads(line))
                 
-        # Set up default transforms if none provided
+        # Enhanced augmentation for balanced learning
+        if split == 'train':
+            labels = [item['label'] for item in self.data]
+            class_counts = Counter(labels)
+            # More aggressive weighting for minority class
+            total_samples = len(labels)
+            self.class_weights = {
+                0: 1.0,  # majority class
+                1: (class_counts[0] / class_counts[1]) * 2.0  # minority class, doubled
+            }
+            self.sample_weights = [self.class_weights[label] for label in labels]
+        
+        # Enhanced default transforms
         if self.transform is None:
-            self.transform = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+            if split == 'train':
+                self.transform = transforms.Compose([
+                    transforms.Resize((256, 256)),  # Larger initial size
+                    transforms.RandomCrop(224),     # Random crop
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                      std=[0.229, 0.224, 0.225])
+                ])
+            else:
+                self.transform = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                      std=[0.229, 0.224, 0.225])
+                ])
             
         # Set up default text processor if none provided
         if self.text_processor is None:
@@ -66,17 +90,6 @@ class HatefulMemesDataset(Dataset):
             
         # Setup for text augmentation
         self.stop_words = set(stopwords.words('english'))
-        
-        # Calculate class weights for sampling
-        if split == 'train':
-            labels = [item['label'] for item in self.data]
-            class_counts = Counter(labels)
-            total_samples = len(labels)
-            self.class_weights = {
-                0: total_samples / (2 * class_counts[0]),
-                1: total_samples / (2 * class_counts[1])
-            }
-            self.sample_weights = [self.class_weights[label] for label in labels]
         
     def __len__(self):
         return len(self.data)

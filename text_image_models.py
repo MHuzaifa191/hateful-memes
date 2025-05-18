@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -168,30 +167,34 @@ class ResNetImageEncoder(nn.Module):
         """
         super(ResNetImageEncoder, self).__init__()
         
-        # Load pretrained ResNet
-        resnet = models.resnet50(pretrained=pretrained)
+        # Use newer ResNet initialization
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
         
-        # Remove the final fully connected layer
-        self.features = nn.Sequential(*list(resnet.children())[:-1])
+        # Remove final layers and add custom head
+        modules = list(resnet.children())[:-2]  # Remove avg pool and fc
+        self.features = nn.Sequential(*modules)
         
-        # Add a new fully connected layer
-        self.fc = nn.Linear(resnet.fc.in_features, out_dim)
+        # Add custom pooling and FC layers
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.max_pool = nn.AdaptiveMaxPool2d((1, 1))
+        
+        # Doubled feature size due to concat of avg and max pool
+        self.fc = nn.Sequential(
+            nn.Linear(resnet.fc.in_features * 2, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(1024, out_dim)
+        )
         
         self.output_dim = out_dim
         
     def forward(self, x):
-        """
-        Forward pass
-        
-        Args:
-            x: Input image tensor [batch_size, 3, 224, 224]
-            
-        Returns:
-            features: Image features [batch_size, out_dim]
-        """
-        # Extract features from ResNet
         x = self.features(x)
-        x = torch.flatten(x, 1)
-        features = self.fc(x)
         
-        return features
+        # Combine average and max pooling
+        avg_pooled = self.avg_pool(x).flatten(1)
+        max_pooled = self.max_pool(x).flatten(1)
+        pooled = torch.cat([avg_pooled, max_pooled], dim=1)
+        
+        features = self.fc(pooled)
+        return F.normalize(features, p=2, dim=1)  # L2 normalize features
