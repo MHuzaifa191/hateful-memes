@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, confusion_matrix, roc_curve, auc
+from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, confusion_matrix, roc_curve
 import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.utils.tensorboard import SummaryWriter
@@ -75,136 +75,6 @@ class HatefulMemesModel(nn.Module):
         
         # Combine features
         combined = torch.cat([image_features, text_features], dim=1)
-        return self.fusion(combined)
-
-class LSTMCNNHatefulMemesModel(nn.Module):
-    def __init__(self, vocab_size=30522, embed_dim=300, hidden_dim=256, num_layers=2, 
-                 dropout=0.3, bidirectional=True):
-        super().__init__()
-        
-        # 1. CNN Image Encoder (simpler than ResNet)
-        self.image_encoder = nn.Sequential(
-            # First conv block
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(32),
-            nn.MaxPool2d(2, 2),  # 112x112
-            
-            # Second conv block
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(64),
-            nn.MaxPool2d(2, 2),  # 56x56
-            
-            # Third conv block
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(128),
-            nn.MaxPool2d(2, 2),  # 28x28
-            
-            # Fourth conv block
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(256),
-            nn.MaxPool2d(2, 2),  # 14x14
-            
-            # Fifth conv block
-            nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(512),
-            nn.MaxPool2d(2, 2),  # 7x7
-            
-            # Global pooling
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Dropout(0.5)
-        )
-        
-        # 2. LSTM Text Encoder
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm = nn.LSTM(
-            embed_dim,
-            hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
-            bidirectional=bidirectional
-        )
-        self.text_dropout = nn.Dropout(dropout)
-        
-        # Calculate output dimensions
-        self.num_directions = 2 if bidirectional else 1
-        self.text_output_dim = hidden_dim * self.num_directions
-        self.image_output_dim = 512
-        
-        # 3. Fusion and classification
-        self.fusion = nn.Sequential(
-            nn.Linear(self.text_output_dim + self.image_output_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, 1)
-        )
-        
-        # 4. Initialize weights
-        self._init_weights()
-        
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, mean=0, std=0.1)
-                if m.padding_idx is not None:
-                    m.weight.data[m.padding_idx].zero_()
-
-    def forward(self, images, input_ids, attention_mask):
-        # Process images with CNN
-        image_features = self.image_encoder(images)
-        
-        # Process text with LSTM
-        # Calculate sequence lengths from attention mask
-        seq_lengths = attention_mask.sum(dim=1).cpu()
-        
-        # Embed tokens
-        embedded = self.embedding(input_ids)
-        embedded = self.text_dropout(embedded)
-        
-        # Pack sequences for LSTM
-        from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-        packed = pack_padded_sequence(
-            embedded, seq_lengths, batch_first=True, enforce_sorted=False
-        )
-        
-        # Process with LSTM
-        self.lstm.flatten_parameters()
-        _, (hidden, _) = self.lstm(packed)
-        
-        # Concatenate bidirectional outputs
-        if self.num_directions == 2:
-            text_features = torch.cat([hidden[-2], hidden[-1]], dim=1)
-        else:
-            text_features = hidden[-1]
-        
-        # Normalize features
-        text_features = F.normalize(text_features, p=2, dim=1)
-        image_features = F.normalize(image_features, p=2, dim=1)
-        
-        # Combine features
-        combined = torch.cat([image_features, text_features], dim=1)
-        
-        # Classification
         return self.fusion(combined)
 
 class KaggleHatefulMemesEvaluator:
@@ -684,19 +554,15 @@ class KaggleHatefulMemesEvaluator:
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-
-from torch.utils.data import DataLoader
-
 # Create datasets
-data_dir = "/kaggle/input/facebook-hateful-meme-dataset/data"
 train_dataset = HatefulMemesDataset(
-    data_dir=data_dir,
+    data_dir='/kaggle/input/facebook-hateful-meme-dataset/data',
     split='train',
     augment=True
 )
 
 val_dataset = HatefulMemesDataset(
-    data_dir=data_dir,
+    data_dir='/kaggle/input/facebook-hateful-meme-dataset/data',
     split='dev',  # Using dev set for validation
     augment=False
 )
@@ -704,44 +570,33 @@ val_dataset = HatefulMemesDataset(
 # Create dataloaders
 train_loader = DataLoader(
     train_dataset,
-    batch_size=32,  # Smaller batch size for LSTM
-    sampler=train_dataset.get_sampler(),  # Use weighted sampler
+    batch_size=16,  # Smaller batch size
+    shuffle=True,
     num_workers=2,
     pin_memory=True
 )
 
 val_loader = DataLoader(
     val_dataset,
-    batch_size=64,
+    batch_size=32,
     shuffle=False,
     num_workers=2
 )
 
 # Initialize model
-model = LSTMCNNHatefulMemesModel(
-    vocab_size=30522,
-    embed_dim=300,
-    hidden_dim=256,
-    num_layers=2,
-    dropout=0.5,  # Increase dropout
-    bidirectional=True
-)
+model = HatefulMemesModel()
 model = model.to(device)
 
 # Initialize optimizer and loss function
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr=1e-3,
-    weight_decay=0.01
-)
+optimizer = torch.optim.AdamW([
+    {'params': model.image_encoder.fc.parameters(), 'lr': 1e-4},
+    {'params': model.text_encoder.parameters(), 'lr': 1e-5},
+    {'params': model.fusion.parameters(), 'lr': 1e-4}
+], weight_decay=0.001)
 
 # Learning rate scheduler
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, 
-    mode='max',
-    factor=0.5,
-    patience=2,
-    verbose=True
+scheduler = torch.optim.lr_scheduler.StepLR(
+    optimizer, step_size=2, gamma=0.5
 )
 
 # Loss function with class weights
@@ -749,22 +604,16 @@ pos_weight = torch.tensor([2.0]).to(device)
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 # Initialize evaluator
-timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-log_dir = f"/kaggle/working/runs/lstm_cnn_{timestamp}"
-os.makedirs(log_dir, exist_ok=True)  # Make sure the directory exists
-evaluator = KaggleHatefulMemesEvaluator(model, device, log_dir=log_dir)
+evaluator = KaggleHatefulMemesEvaluator(model, device)
 
 # Training loop
-num_epochs = 10
-early_stopping_patience = 3
-no_improve_epochs = 0
+num_epochs = 1
 best_val_auroc = 0
 
 for epoch in range(num_epochs):
     # Training phase
     model.train()
     total_loss = 0
-    
     for batch_idx, batch in enumerate(train_loader):
         # Move data to device
         images = batch['image'].to(device)
@@ -772,15 +621,16 @@ for epoch in range(num_epochs):
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['label'].float().to(device)
         
-        # Mixed precision training - specify device type
-        with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+        # Mixed precision training
+        with autocast('cuda'):
             outputs = model(images, input_ids, attention_mask)
             loss = criterion(outputs.squeeze(), labels)
         
         optimizer.zero_grad()
+        scaler = GradScaler()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         scaler.step(optimizer)
         scaler.update()
         
@@ -791,7 +641,7 @@ for epoch in range(num_epochs):
                                    epoch * len(train_loader) + batch_idx)
         
         # Print progress
-        if (batch_idx + 1) % 10 == 0:
+        if (batch_idx + 1) % 20 == 0:
             print(f'Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_loader)}], '
                   f'Loss: {loss.item():.4f}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
     
@@ -807,9 +657,6 @@ for epoch in range(num_epochs):
     print(f"AUROC: {val_metrics['auroc']:.3f}")
     print(f"F1: {val_metrics['f1']:.3f}")
     
-    # Update learning rate based on validation performance
-    scheduler.step(val_metrics['auroc'])
-    
     # Log sample predictions
     batch = next(iter(val_loader))
     with torch.no_grad():
@@ -822,46 +669,109 @@ for epoch in range(num_epochs):
     if epoch % 2 == 0:
         evaluator.analyze_model_performance(val_loader, epoch, mode='val')
     
-    # Early stopping check
+    # Save best model
     if val_metrics['auroc'] > best_val_auroc:
         best_val_auroc = val_metrics['auroc']
-        torch.save(model.state_dict(), os.path.join(log_dir, 'best_model.pth'))
-        no_improve_epochs = 0
-    else:
-        no_improve_epochs += 1
-        
-    if no_improve_epochs >= early_stopping_patience:
-        print(f"Early stopping triggered after {epoch+1} epochs")
-        break
+        torch.save(model.state_dict(), 'best_model.pth')
+    
+    scheduler.step()
 
 # Final evaluation
 print("\nTraining completed! Loading best model for final evaluation...")
 try:
-    checkpoint = torch.load(os.path.join(log_dir, 'best_model.pth'))
+    checkpoint = torch.load('best_model.pth')
     model.load_state_dict(checkpoint)
     print("Successfully loaded best model.")
-    
-    # Final validation evaluation
-    final_metrics = evaluator.evaluate(val_loader, epoch='final', mode='val')
-    print(f"Final Validation AUROC: {final_metrics['auroc']:.4f}")
-    print(f"Final Validation F1: {final_metrics['f1']:.4f}")
-    
-except Exception as e:
-    print(f"Error loading best model: {e}")
+except:
+    print("Could not load best model, using current model state.")
 
-# Generate analysis report
+# Test evaluation
+try:
+    # Create a special test dataset that handles missing labels
+    class TestHatefulMemesDataset(HatefulMemesDataset):
+        def __getitem__(self, idx):
+            item = self.data[idx]
+            
+            # Load and transform image
+            img_path = os.path.join(self.data_dir, item['img'])
+            image = Image.open(img_path).convert('RGB')
+            if self.transform:
+                image = self.transform(image)
+            
+            # Process text
+            text = item['text']
+            
+            # Tokenize text
+            encoding = self.text_processor(
+                text,
+                padding='max_length',
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors='pt'
+            )
+            
+            # Create result dictionary
+            result = {
+                'image': image,
+                'input_ids': encoding['input_ids'].squeeze(0),
+                'attention_mask': encoding['attention_mask'].squeeze(0),
+                'text': text,
+                'label': torch.tensor(0.0, dtype=torch.float)  # Dummy label
+            }
+            
+            return result
+
+    # Then use this for the test set
+    test_dataset = TestHatefulMemesDataset(
+        data_dir='/kaggle/input/facebook-hateful-meme-dataset/data',
+        split='test',
+        augment=False
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=2
+    )
+
+    print("Running evaluation on test set...")
+    test_metrics = evaluator.evaluate(test_loader, epoch='final', mode='test')
+    print("\nTest Predictions Generated")
+    
+    # Generate CSV submission file
+    submission_file = os.path.join(evaluator.log_dir, 'submission.csv')
+    with open(submission_file, 'w') as f:
+        f.write('id,proba\n')
+        for i, prob in enumerate(test_metrics['probabilities']):
+            f.write(f'{test_dataset.data[i]["id"]},{prob:.6f}\n')
+    
+    print(f"Submission file created at {submission_file}")
+except Exception as e:
+    print(f"Error during test evaluation: {e}")
+    print("Skipping test evaluation.")
+    test_metrics = {
+        'auroc': 0.0,
+        'precision': 0.0,
+        'recall': 0.0,
+        'f1': 0.0
+    }
+
+# Generate analysis report with just the current model
 dataset_info = {
     'train_samples': len(train_dataset),
     'val_samples': len(val_dataset),
+    'test_samples': len(test_dataset) if 'test_dataset' in locals() else 'N/A',
     'class_distribution': "See training data distribution"
 }
 
+# Create a simplified model results dictionary with just your current model
 model_results = {
-    'LSTM+CNN (Late Fusion)': {
-        'auroc': final_metrics['auroc'] if 'final_metrics' in locals() else best_val_auroc,
-        'precision': final_metrics['precision'] if 'final_metrics' in locals() else 0,
-        'recall': final_metrics['recall'] if 'final_metrics' in locals() else 0,
-        'f1': final_metrics['f1'] if 'final_metrics' in locals() else 0
+    'BERT+ResNet (Late Fusion)': {
+        'auroc': test_metrics['auroc'],
+        'precision': test_metrics['precision'],
+        'recall': test_metrics['recall'],
+        'f1': test_metrics['f1']
     }
 }
 

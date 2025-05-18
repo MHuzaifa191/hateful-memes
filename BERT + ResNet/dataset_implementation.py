@@ -55,9 +55,6 @@ class HatefulMemesDataset(Dataset):
                 1: total / (2 * class_counts[1])   # hateful
             }
             self.sample_weights = [self.class_weights[label] for label in labels]
-        else:
-            # Initialize empty sample_weights for non-train splits
-            self.sample_weights = []
         
         # Enhanced transforms with stronger augmentation
         if self.transform is None:
@@ -100,16 +97,7 @@ class HatefulMemesDataset(Dataset):
             self.text_processor = BertTokenizer.from_pretrained('bert-base-uncased')
             
         # Setup for text augmentation
-        self.augment = augment
-        if self.augment:
-            try:
-                import nltk
-                from nltk.corpus import stopwords
-                nltk.download('stopwords', quiet=True)
-                self.stop_words = set(stopwords.words('english'))
-            except:
-                print("NLTK stopwords not available, using minimal stopwords")
-                self.stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'was', 'were'}
+        self.stop_words = set(stopwords.words('english'))
         
     def __len__(self):
         return len(self.data)
@@ -123,9 +111,9 @@ class HatefulMemesDataset(Dataset):
         if self.transform:
             image = self.transform(image)
             
-        # Get text and apply augmentation if needed
+        # Process text with augmentation
         text = item['text']
-        if self.augment and random.random() < 0.5:  # 50% chance to augment text
+        if self.split == 'train' and self.augment:
             text = self._augment_text(text)
             
         # Tokenize text
@@ -146,50 +134,34 @@ class HatefulMemesDataset(Dataset):
         }
         
     def _augment_text(self, text):
-        """Apply text augmentation techniques"""
-        augmentation_type = random.choice(['synonym', 'deletion', 'swap', 'none'])
-        
-        if augmentation_type == 'none':
-            return text
-        
-        words = text.split()
-        
-        if augmentation_type == 'deletion' and len(words) > 4:
-            # Randomly delete non-stopwords (up to 15% of words)
-            num_to_delete = max(1, int(len(words) * 0.15))
-            delete_indices = random.sample(range(len(words)), num_to_delete)
-            words = [w for i, w in enumerate(words) if i not in delete_indices or w.lower() in self.stop_words]
-        
-        elif augmentation_type == 'swap' and len(words) > 2:
-            # Randomly swap adjacent words (up to 2 pairs)
-            num_swaps = random.randint(1, min(2, len(words)//2))
-            for _ in range(num_swaps):
-                i = random.randint(0, len(words)-2)
-                words[i], words[i+1] = words[i+1], words[i]
-        
-        elif augmentation_type == 'synonym':
-            # Replace some words with synonyms (if available)
-            try:
-                from nltk.corpus import wordnet
-                nltk.download('wordnet', quiet=True)
-                
-                for i, word in enumerate(words):
-                    if random.random() < 0.2 and word.lower() not in self.stop_words:
-                        synsets = wordnet.synsets(word)
-                        if synsets:
-                            synonyms = [lemma.name() for synset in synsets for lemma in synset.lemmas()]
-                            if synonyms:
-                                words[i] = random.choice(synonyms).replace('_', ' ')
-            except:
-                # If wordnet is not available, just do a simple character swap
-                for i, word in enumerate(words):
-                    if random.random() < 0.1 and len(word) > 3:
-                        chars = list(word)
-                        j = random.randint(0, len(chars)-2)
-                        chars[j], chars[j+1] = chars[j+1], chars[j]
-                        words[i] = ''.join(chars)
-        
-        return ' '.join(words)
+        """Enhanced text augmentation"""
+        if random.random() < 0.7:  # 70% chance of augmentation
+            words = text.split()
+            
+            # Random word swap (15% chance)
+            if random.random() < 0.15:
+                if len(words) >= 2:
+                    idx1, idx2 = random.sample(range(len(words)), 2)
+                    words[idx1], words[idx2] = words[idx2], words[idx1]
+            
+            # Random word deletion (10% chance per word)
+            words = [w for w in words if random.random() > 0.1]
+            
+            # Random typo simulation (15% chance per word)
+            if random.random() < 0.15:
+                for i in range(len(words)):
+                    if random.random() < 0.15:
+                        word = words[i]
+                        if len(word) > 3:
+                            # Randomly swap adjacent characters
+                            pos = random.randint(0, len(word)-2)
+                            word = list(word)
+                            word[pos], word[pos+1] = word[pos+1], word[pos]
+                            words[i] = ''.join(word)
+            
+            text = ' '.join(words)
+            
+        return text
     
     def get_sampler(self):
         """Get weighted sampler for balanced training"""
