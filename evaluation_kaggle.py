@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from sklearn.metrics import f1_score
 from torch.amp import autocast, GradScaler
+from PIL import Image
 
 class HatefulMemesModel(nn.Module):
     def __init__(self, bert_model='bert-base-uncased'):
@@ -686,7 +687,42 @@ except:
 
 # Test evaluation
 try:
-    test_dataset = HatefulMemesDataset(
+    # Create a special test dataset that handles missing labels
+    class TestHatefulMemesDataset(HatefulMemesDataset):
+        def __getitem__(self, idx):
+            item = self.data[idx]
+            
+            # Load and transform image
+            img_path = os.path.join(self.data_dir, item['img'])
+            image = Image.open(img_path).convert('RGB')
+            if self.transform:
+                image = self.transform(image)
+            
+            # Process text
+            text = item['text']
+            
+            # Tokenize text
+            encoding = self.text_processor(
+                text,
+                padding='max_length',
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors='pt'
+            )
+            
+            # Create result dictionary
+            result = {
+                'image': image,
+                'input_ids': encoding['input_ids'].squeeze(0),
+                'attention_mask': encoding['attention_mask'].squeeze(0),
+                'text': text,
+                'label': torch.tensor(0.0, dtype=torch.float)  # Dummy label
+            }
+            
+            return result
+
+    # Then use this for the test set
+    test_dataset = TestHatefulMemesDataset(
         data_dir='/kaggle/input/facebook-hateful-meme-dataset/data',
         split='test',
         augment=False
