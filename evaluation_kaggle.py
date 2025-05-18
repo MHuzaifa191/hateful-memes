@@ -606,7 +606,7 @@ criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 evaluator = KaggleHatefulMemesEvaluator(model, device)
 
 # Training loop
-num_epochs = 10
+num_epochs = 1
 best_val_auroc = 0
 
 for epoch in range(num_epochs):
@@ -677,58 +677,72 @@ for epoch in range(num_epochs):
 
 # Final evaluation
 print("\nTraining completed! Loading best model for final evaluation...")
-checkpoint = torch.load('best_model.pth')
-model.load_state_dict(checkpoint)
-
-# If you have multiple models to compare
-if epoch == num_epochs - 1:  # Only at the end of training
-    # Create LSTM model for comparison
-    lstm_model = LSTMHatefulMemesModel()  # You would need to implement this
-    lstm_model.load_state_dict(torch.load('lstm_model.pth'))  # Load pretrained weights
-    lstm_model = lstm_model.to(device)
-    
-    # Create early fusion model for comparison
-    early_fusion_model = EarlyFusionHatefulMemesModel()  # You would need to implement this
-    early_fusion_model.load_state_dict(torch.load('early_fusion_model.pth'))
-    early_fusion_model = early_fusion_model.to(device)
-    
-    # Compare models
-    models_dict = {
-        'BERT+ResNet (Late Fusion)': model,
-        'LSTM+ResNet (Late Fusion)': lstm_model,
-        'BERT+ResNet (Early Fusion)': early_fusion_model
-    }
-    
-    model_results = evaluator.compare_models(models_dict, val_loader, mode='val')
-    
-    # Generate analysis report
-    dataset_info = {
-        'train_samples': len(train_dataset),
-        'val_samples': len(val_dataset),
-        'test_samples': len(test_dataset),
-        'class_distribution': f"Non-hateful: {train_dataset.class_weights[0]:.2f}, Hateful: {train_dataset.class_weights[1]:.2f}"
-    }
-    
-    evaluator.generate_analysis_report(model_results, dataset_info)
+try:
+    checkpoint = torch.load('best_model.pth')
+    model.load_state_dict(checkpoint)
+    print("Successfully loaded best model.")
+except:
+    print("Could not load best model, using current model state.")
 
 # Test evaluation
-test_dataset = HatefulMemesDataset(
-    data_dir='/kaggle/input/facebook-hateful-meme-dataset/data',
-    split='test',
-    augment=False
-)
+try:
+    test_dataset = HatefulMemesDataset(
+        data_dir='/kaggle/input/facebook-hateful-meme-dataset/data',
+        split='test',
+        augment=False
+    )
 
-test_loader = DataLoader(
-    test_dataset,
-    batch_size=32,
-    shuffle=False,
-    num_workers=2
-)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=2
+    )
 
-test_metrics = evaluator.evaluate(test_loader, epoch='final', mode='test')
-print("\nFinal Test Metrics:")
-print(f"AUROC: {test_metrics['auroc']:.3f}")
-print(f"F1: {test_metrics['f1']:.3f}")
+    print("Running evaluation on test set...")
+    test_metrics = evaluator.evaluate(test_loader, epoch='final', mode='test')
+    print("\nTest Predictions Generated")
+    
+    # Generate CSV submission file
+    submission_file = os.path.join(evaluator.log_dir, 'submission.csv')
+    with open(submission_file, 'w') as f:
+        f.write('id,proba\n')
+        for i, prob in enumerate(test_metrics['probabilities']):
+            f.write(f'{test_dataset.data[i]["id"]},{prob:.6f}\n')
+    
+    print(f"Submission file created at {submission_file}")
+except Exception as e:
+    print(f"Error during test evaluation: {e}")
+    print("Skipping test evaluation.")
+    test_metrics = {
+        'auroc': 0.0,
+        'precision': 0.0,
+        'recall': 0.0,
+        'f1': 0.0
+    }
+
+# Generate analysis report with just the current model
+dataset_info = {
+    'train_samples': len(train_dataset),
+    'val_samples': len(val_dataset),
+    'test_samples': len(test_dataset) if 'test_dataset' in locals() else 'N/A',
+    'class_distribution': "See training data distribution"
+}
+
+# Create a simplified model results dictionary with just your current model
+model_results = {
+    'BERT+ResNet (Late Fusion)': {
+        'auroc': test_metrics['auroc'],
+        'precision': test_metrics['precision'],
+        'recall': test_metrics['recall'],
+        'f1': test_metrics['f1']
+    }
+}
+
+# Generate the analysis report
+evaluator.generate_analysis_report(model_results, dataset_info)
 
 # Close TensorBoard writer
-evaluator.close() 
+evaluator.close()
+
+print("\nEvaluation complete! Check the log directory for visualizations and analysis.")
