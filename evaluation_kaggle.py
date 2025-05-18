@@ -8,7 +8,7 @@ import torchvision
 import os
 from datetime import datetime
 import torch.nn as nn
-from transformers import BertModel
+from transformers import BertModel, AutoModel
 from torchvision.models import resnet50, ResNet50_Weights
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -19,71 +19,62 @@ class HatefulMemesModel(nn.Module):
     def __init__(self, bert_model='bert-base-uncased'):
         super().__init__()
         
-        # 1. More aggressive freezing of backbone
-        self.image_encoder = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)  # Fix deprecation warning
+        # 1. Simpler image encoder with more freezing
+        self.image_encoder = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        # Freeze everything except final classifier
         for param in self.image_encoder.parameters():
             param.requires_grad = False
-        # Only unfreeze final layers
-        for param in self.image_encoder.layer4.parameters():
-            param.requires_grad = True
-        self.image_encoder.fc = nn.Linear(self.image_encoder.fc.in_features, 768)
+        self.image_encoder.fc = nn.Sequential(
+            nn.Linear(2048, 768),
+            nn.ReLU(),
+            nn.Dropout(0.2)
+        )
         
-        # 2. Freeze more BERT layers
+        # 2. Back to BERT with more freezing
         self.text_encoder = BertModel.from_pretrained(bert_model)
         for param in self.text_encoder.parameters():
             param.requires_grad = False
-        # Only unfreeze final layers
-        for param in self.text_encoder.encoder.layer[-2:].parameters():
+        # Only unfreeze final layer
+        for param in self.text_encoder.encoder.layer[-1:].parameters():
             param.requires_grad = True
             
-        # 3. Simpler fusion network
+        # 3. Much simpler fusion
         self.fusion = nn.Sequential(
-            nn.Linear(768 * 2, 512),
-            nn.LayerNorm(512),
-            nn.GELU(),
-            nn.Dropout(0.5),  # Increased dropout
-            
-            nn.Linear(512, 128),
-            nn.LayerNorm(128),
-            nn.GELU(),
-            nn.Dropout(0.3),
-            
-            nn.Linear(128, 1)
+            nn.Linear(768 * 2, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 1)
         )
         
-        # 4. Initialize weights properly
+        # 4. Better initialization
         self._init_weights()
         
     def _init_weights(self):
-        """Initialize the weights"""
-        for module in self.fusion.modules():
-            if isinstance(module, nn.Linear):
-                module.weight.data.normal_(mean=0.0, std=0.02)
-                if module.bias is not None:
-                    module.bias.data.zero_()
-                    
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
     def forward(self, images, input_ids, attention_mask):
-        # 5. Better feature extraction
+        # 4. Better feature extraction
         image_features = self.image_encoder(images)
+        image_features = F.normalize(image_features, p=2, dim=1)
         
         text_outputs = self.text_encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True
         )
-        
-        # Use both [CLS] and average of last hidden state
-        cls_token = text_outputs.last_hidden_state[:, 0, :]
-        avg_token = text_outputs.last_hidden_state.mean(dim=1)
-        text_features = (cls_token + avg_token) / 2
-        
-        # Normalize features
-        image_features = F.normalize(image_features, p=2, dim=1)
+        # Use both last hidden state and pooler output
+        last_hidden = text_outputs.last_hidden_state[:, 0, :]
+        pooler = text_outputs.pooler_output
+        text_features = (last_hidden + pooler) / 2
         text_features = F.normalize(text_features, p=2, dim=1)
         
-        # Combine and classify
+        # Combine features
         combined = torch.cat([image_features, text_features], dim=1)
-        return self.fusion(combined).squeeze()
+        return self.fusion(combined)
 
 class KaggleHatefulMemesEvaluator:
     def __init__(self, model, device, log_dir='/kaggle/working/runs/hateful_memes'):
@@ -282,18 +273,18 @@ model = model.to(device)
 
 # Initialize optimizer and loss function
 optimizer = torch.optim.AdamW([
-    {'params': model.image_encoder.parameters(), 'lr': 5e-6},
+    {'params': model.image_encoder.fc.parameters(), 'lr': 1e-4},
     {'params': model.text_encoder.parameters(), 'lr': 1e-5},
-    {'params': model.fusion.parameters(), 'lr': 5e-5}
-], weight_decay=0.1)
+    {'params': model.fusion.parameters(), 'lr': 1e-4}
+], weight_decay=0.001)
 
 # Learning rate scheduler
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='max', factor=0.5, patience=1, verbose=True
+scheduler = torch.optim.lr_scheduler.StepLR(
+    optimizer, step_size=2, gamma=0.5
 )
 
 # Loss function with class weights
-pos_weight = torch.tensor([3.0]).to(device)
+pos_weight = torch.tensor([2.0]).to(device)
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 # Initialize evaluator
@@ -312,18 +303,18 @@ for epoch in range(num_epochs):
         images = batch['image'].to(device)
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
-        labels = batch['label'].to(device)
+        labels = batch['label'].float().to(device)
         
         # Mixed precision training
         with autocast('cuda'):
             outputs = model(images, input_ids, attention_mask)
-            loss = criterion(outputs, labels)
+            loss = criterion(outputs.squeeze(), labels)
         
         optimizer.zero_grad()
         scaler = GradScaler()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)  # Tighter clipping
         scaler.step(optimizer)
         scaler.update()
         
@@ -354,17 +345,14 @@ for epoch in range(num_epochs):
     # Save best model
     if val_metrics['auroc'] > best_val_auroc:
         best_val_auroc = val_metrics['auroc']
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'val_auroc': best_val_auroc,
-        }, f'/kaggle/working/best_model.pth')
+        torch.save(model.state_dict(), 'best_model.pth')
+    
+    scheduler.step()
 
 # Final evaluation
 print("\nTraining completed! Loading best model for final evaluation...")
-checkpoint = torch.load('/kaggle/working/best_model.pth')
-model.load_state_dict(checkpoint['model_state_dict'])
+checkpoint = torch.load('best_model.pth')
+model.load_state_dict(checkpoint)
 
 test_dataset = HatefulMemesDataset(
     data_dir='/kaggle/input/facebook-hateful-meme-dataset/data',
