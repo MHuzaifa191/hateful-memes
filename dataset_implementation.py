@@ -29,14 +29,6 @@ class HatefulMemesDataset(Dataset):
                  max_length=128, augment=False):
         """
         Custom PyTorch Dataset for the Hateful Memes dataset
-        
-        Args:
-            data_dir: Directory containing the dataset files
-            split: 'train', 'dev', or 'test'
-            transform: Image transformations
-            text_processor: Text preprocessing function or tokenizer
-            max_length: Maximum sequence length for text
-            augment: Whether to apply data augmentation
         """
         self.data_dir = data_dir
         self.split = split
@@ -52,39 +44,55 @@ class HatefulMemesDataset(Dataset):
             for line in f:
                 self.data.append(json.loads(line))
                 
-        # Enhanced augmentation for balanced learning
+        # Calculate balanced class weights
         if split == 'train':
             labels = [item['label'] for item in self.data]
             class_counts = Counter(labels)
-            # More aggressive weighting for minority class
-            total_samples = len(labels)
+            total = sum(class_counts.values())
+            # Inverse frequency weighting
             self.class_weights = {
-                0: 1.0,  # majority class
-                1: (class_counts[0] / class_counts[1]) * 2.0  # minority class, doubled
+                0: total / (2 * class_counts[0]),  # non-hateful
+                1: total / (2 * class_counts[1])   # hateful
             }
             self.sample_weights = [self.class_weights[label] for label in labels]
         
-        # Enhanced default transforms
+        # Enhanced transforms with stronger augmentation
         if self.transform is None:
             if split == 'train':
                 self.transform = transforms.Compose([
-                    transforms.Resize((256, 256)),  # Larger initial size
-                    transforms.RandomCrop(224),     # Random crop
+                    transforms.Resize((288, 288)),  # Even larger initial size
+                    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
                     transforms.RandomHorizontalFlip(),
-                    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                    transforms.ColorJitter(
+                        brightness=0.3,
+                        contrast=0.3,
+                        saturation=0.3,
+                        hue=0.1
+                    ),
+                    transforms.RandomAffine(
+                        degrees=10, 
+                        translate=(0.1, 0.1),
+                        scale=(0.9, 1.1)
+                    ),
                     transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                      std=[0.229, 0.224, 0.225])
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]
+                    ),
+                    transforms.RandomErasing(p=0.3)
                 ])
             else:
                 self.transform = transforms.Compose([
-                    transforms.Resize((224, 224)),
+                    transforms.Resize((256, 256)),
+                    transforms.CenterCrop(224),
                     transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                      std=[0.229, 0.224, 0.225])
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]
+                    )
                 ])
-            
-        # Set up default text processor if none provided
+                
+        # Set up text processor with better augmentation
         if self.text_processor is None:
             self.text_processor = BertTokenizer.from_pretrained('bert-base-uncased')
             
@@ -97,89 +105,76 @@ class HatefulMemesDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         
-        # Load image
+        # Load and transform image
         img_path = os.path.join(self.data_dir, item['img'])
         image = Image.open(img_path).convert('RGB')
-        
-        # Get text and label
-        text = item['text']
-        label = torch.tensor(item['label'], dtype=torch.float32)
-        
-        # Apply augmentations if needed
-        if self.augment and item['label'] == 1:  # Apply augmentation to minority class (assuming hateful is minority)
-            # Image augmentation
-            aug_transform = transforms.Compose([
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomRotation(10),
-                self.transform
-            ])
-            image = aug_transform(image)
-            
-            # Text augmentation - simple synonym replacement (could be enhanced)
-            text = self.augment_text(text)
-        else:
+        if self.transform:
             image = self.transform(image)
-        
-        # Process text based on the processor type
-        if isinstance(self.text_processor, BertTokenizer):
-            # For BERT
-            text_encoded = self.text_processor(
-                text,
-                padding='max_length',
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors='pt'
-            )
-            return {
-                'image': image,
-                'input_ids': text_encoded['input_ids'].squeeze(),
-                'attention_mask': text_encoded['attention_mask'].squeeze(),
-                'text': text,  # Keep original text for visualization
-                'label': label,
-                'id': item['id']
-            }
-        else:
-            # For LSTM or other text processors
-            tokens = self.text_processor(text)
-            return {
-                'image': image,
-                'text_tokens': tokens,
-                'text': text,  # Keep original text for visualization
-                'label': label,
-                'id': item['id']
-            }
-    
-    def augment_text(self, text):
-        """Simple text augmentation by replacing random words with synonyms"""
-        # This is a placeholder - a more sophisticated approach would use WordNet
-        words = text.split()
-        if len(words) <= 3:
-            return text  # Don't augment very short texts
             
-        # Randomly choose 1-2 words to modify
-        num_to_change = min(2, max(1, int(len(words) * 0.2)))
-        indices = random.sample(range(len(words)), num_to_change)
+        # Process text with augmentation
+        text = item['text']
+        if self.split == 'train' and self.augment:
+            text = self._augment_text(text)
+            
+        # Tokenize text
+        encoding = self.text_processor(
+            text,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors='pt'
+        )
         
-        for idx in indices:
-            # Simple character swap - in practice, use a synonym library
-            word = words[idx]
-            if len(word) > 3:
-                i, j = sorted(random.sample(range(1, len(word)-1), 2))
-                chars = list(word)
-                chars[i], chars[j] = chars[j], chars[i]
-                words[idx] = ''.join(chars)
-                
-        return ' '.join(words)
-
+        return {
+            'image': image,
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'text': text,  # Return original/augmented text for debugging
+            'label': torch.tensor(item['label'], dtype=torch.float)
+        }
+        
+    def _augment_text(self, text):
+        """Enhanced text augmentation"""
+        if random.random() < 0.7:  # 70% chance of augmentation
+            words = text.split()
+            
+            # Random word swap (15% chance)
+            if random.random() < 0.15:
+                if len(words) >= 2:
+                    idx1, idx2 = random.sample(range(len(words)), 2)
+                    words[idx1], words[idx2] = words[idx2], words[idx1]
+            
+            # Random word deletion (10% chance per word)
+            words = [w for w in words if random.random() > 0.1]
+            
+            # Random typo simulation (15% chance per word)
+            if random.random() < 0.15:
+                for i in range(len(words)):
+                    if random.random() < 0.15:
+                        word = words[i]
+                        if len(word) > 3:
+                            # Randomly swap adjacent characters
+                            pos = random.randint(0, len(word)-2)
+                            word = list(word)
+                            word[pos], word[pos+1] = word[pos+1], word[pos]
+                            words[i] = ''.join(word)
+            
+            text = ' '.join(words)
+            
+        return text
+    
     def get_sampler(self):
-        """Returns a weighted sampler to handle class imbalance"""
-        if hasattr(self, 'sample_weights'):
-            return WeightedRandomSampler(
-                weights=self.sample_weights,
-                num_samples=len(self.sample_weights),
-                replacement=True
-            )
-        return None
+        """Get weighted sampler for balanced training"""
+        if self.split != 'train':
+            return None
+            
+        weights = torch.DoubleTensor(self.sample_weights)
+        sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(weights),
+            replacement=True
+        )
+        return sampler
 
 # Functions for text preprocessing
 
