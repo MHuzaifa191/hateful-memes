@@ -25,11 +25,6 @@ Then copy each file on a notebook cell and run it. Copy files onto cells in this
 - text_image_models.py
 - evaluation_kaggle.py
 
-## Results
-
-I have included results in `Images` and `Tensorboard Logs` folders.
-
-
 ## Models Implemented
 
 ### Late Fusion Models
@@ -56,37 +51,10 @@ The models are trained and evaluated on the Facebook Hateful Memes Challenge dat
 
 ## Results
 
+
+I have included results in `Images` and `Tensorboard Logs` folders.
+
+
 The models achieve varying performance on the validation set:
 - Late Fusion LSTM+CNN: AUROC ~0.58-0.60
 - Early Fusion models show comparable performance
-
-## Usage
-
-The code is designed to run in a Kaggle environment with the Facebook Hateful Memes dataset.
-
-```python
-# Example usage
-python evaluation_kaggle.py
-```
-
-## Requirements
-
-- PyTorch
-- torchvision
-- transformers (for BERT models)
-- scikit-learn
-- matplotlib
-- tensorboard
-- numpy
-- pandas
-
-## Future Work
-
-- Implement attention mechanisms for better feature fusion
-- Explore more sophisticated data augmentation techniques
-- Experiment with ensemble methods
-- Incorporate visual-linguistic pre-trained models like CLIP
-
-## License
-
-This project is available under the MIT License.
