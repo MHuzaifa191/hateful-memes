@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from sklearn.metrics import f1_score
 from torch.amp import autocast, GradScaler
 from PIL import Image
+from text_image_models import EarlyFusionLSTMCNNModel
 
 class HatefulMemesModel(nn.Module):
     def __init__(self, bert_model='bert-base-uncased'):
@@ -717,14 +718,15 @@ val_loader = DataLoader(
     num_workers=2
 )
 
-# Initialize model
-model = LSTMCNNHatefulMemesModel(
+# Initialize early fusion model
+model = EarlyFusionLSTMCNNModel(
     vocab_size=30522,
     embed_dim=300,
     hidden_dim=256,
     num_layers=2,
     dropout=0.5,  # Increase dropout
-    bidirectional=True
+    bidirectional=True,
+    fusion_dim=512
 )
 model = model.to(device)
 
@@ -750,7 +752,7 @@ criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 # Initialize evaluator
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-log_dir = f"/kaggle/working/runs/lstm_cnn_{timestamp}"
+log_dir = f"/kaggle/working/runs/early_fusion_{timestamp}"
 os.makedirs(log_dir, exist_ok=True)  # Make sure the directory exists
 evaluator = KaggleHatefulMemesEvaluator(model, device, log_dir=log_dir)
 
@@ -759,6 +761,9 @@ num_epochs = 10
 early_stopping_patience = 3
 no_improve_epochs = 0
 best_val_auroc = 0
+
+# Initialize gradient scaler for mixed precision training
+scaler = GradScaler()
 
 for epoch in range(num_epochs):
     # Training phase
@@ -857,7 +862,7 @@ dataset_info = {
 }
 
 model_results = {
-    'LSTM+CNN (Late Fusion)': {
+    'Early Fusion (LSTM+CNN)': {
         'auroc': final_metrics['auroc'] if 'final_metrics' in locals() else best_val_auroc,
         'precision': final_metrics['precision'] if 'final_metrics' in locals() else 0,
         'recall': final_metrics['recall'] if 'final_metrics' in locals() else 0,

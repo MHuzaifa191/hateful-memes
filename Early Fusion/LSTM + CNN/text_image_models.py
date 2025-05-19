@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertModel, BertConfig
 import torchvision.models as models
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 class LSTMTextEncoder(nn.Module):
     def __init__(self, vocab_size, embed_dim, hidden_dim, num_layers=1, dropout=0.2, bidirectional=True):
@@ -198,3 +199,137 @@ class ResNetImageEncoder(nn.Module):
         
         features = self.fc(pooled)
         return F.normalize(features, p=2, dim=1)  # L2 normalize features
+
+class EarlyFusionLSTMCNNModel(nn.Module):
+    def __init__(self, vocab_size=30522, embed_dim=300, hidden_dim=256, num_layers=2, 
+                 dropout=0.3, bidirectional=True, fusion_dim=512):
+        super().__init__()
+        
+        # Text Encoder: LSTM
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.lstm = nn.LSTM(
+            embed_dim,
+            hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=bidirectional
+        )
+        self.text_dropout = nn.Dropout(dropout)
+        self.num_directions = 2 if bidirectional else 1
+        self.text_output_dim = hidden_dim * self.num_directions
+        
+        # Image Encoder: CNN
+        self.image_encoder = nn.Sequential(
+            # First conv block
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+            nn.MaxPool2d(2, 2),  # 112x112
+            
+            # Second conv block
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.MaxPool2d(2, 2),  # 56x56
+            
+            # Third conv block
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
+            nn.MaxPool2d(2, 2),  # 28x28
+        )
+        
+        # Early fusion: combine features before final processing
+        # Calculate the output size of the CNN
+        self.cnn_output_size = 128 * 28 * 28
+        
+        # Cross-modal attention mechanism
+        self.use_attention = True
+        if self.use_attention:
+            self.text_attention = nn.Linear(self.text_output_dim, fusion_dim)
+            self.image_attention = nn.Linear(self.cnn_output_size, fusion_dim)
+            self.attention_weights = nn.Linear(fusion_dim, 2)
+        
+        # Fusion layers
+        combined_dim = self.text_output_dim + self.cnn_output_size
+        self.fusion = nn.Sequential(
+            nn.Linear(combined_dim, fusion_dim),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(fusion_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 1)
+        )
+        
+        # Initialize weights
+        self._init_weights()
+        
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0, std=0.1)
+                if m.padding_idx is not None:
+                    nn.init.zeros_(m.weight[m.padding_idx])
+                    
+    def forward(self, images, input_ids, attention_mask):
+        # Process text with LSTM
+        # Calculate sequence lengths from attention mask
+        seq_lengths = attention_mask.sum(dim=1).cpu()
+        
+        # Embed tokens
+        embedded = self.embedding(input_ids)
+        embedded = self.text_dropout(embedded)
+        
+        # Pack sequences for LSTM
+        packed = pack_padded_sequence(
+            embedded, seq_lengths, batch_first=True, enforce_sorted=False
+        )
+        
+        # Process with LSTM
+        self.lstm.flatten_parameters()
+        _, (hidden, _) = self.lstm(packed)
+        
+        # Concatenate bidirectional outputs
+        if self.num_directions == 2:
+            text_features = torch.cat([hidden[-2], hidden[-1]], dim=1)
+        else:
+            text_features = hidden[-1]
+        
+        # Process images with CNN
+        image_features = self.image_encoder(images)
+        image_features = image_features.view(image_features.size(0), -1)  # Flatten
+        
+        # Apply cross-modal attention if enabled
+        if self.use_attention:
+            text_proj = self.text_attention(text_features)
+            image_proj = self.image_attention(image_features)
+            
+            # Calculate attention scores
+            fusion_repr = text_proj + image_proj
+            attention_scores = F.softmax(self.attention_weights(fusion_repr), dim=1)
+            
+            # Apply attention weights
+            text_features = text_features * attention_scores[:, 0].unsqueeze(1)
+            image_features = image_features * attention_scores[:, 1].unsqueeze(1)
+        
+        # Early fusion: concatenate features
+        combined = torch.cat([text_features, image_features], dim=1)
+        
+        # Classification
+        return self.fusion(combined)
