@@ -18,6 +18,14 @@ Then load the dataset on kaggle. It is already available there.
 ```
 facebook_hateful_meme_dataset_path = kagglehub.dataset_download('parthplc/facebook-hateful-meme-dataset')
 ```
+Navigate to the folder of the model you want to run.
+For example, if you want to run the LSTM+CNN model with late fusion, navigate to the `LSTM+CNN` folder.
+
+```
+cd 'Late Fusion'
+cd 'LSTM + CNN'
+cd code
+```
 
 Then copy each file on a notebook cell and run it. Copy files onto cells in this order:
 
