@@ -33,6 +33,8 @@ Then copy each file on a notebook cell and run it. Copy files onto cells in this
 - text_image_models.py
 - evaluation_kaggle.py
 
+The sample meme outputs and all the results+logs are located inside the model folders.
+
 ## Models Implemented
 
 ### Late Fusion Models
